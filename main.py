@@ -156,7 +156,7 @@ class TranscriptTool:
 
         translate.warmup(self._langs)  # install packages for the configured languages
 
-        self.overlay = Overlay()
+        self.overlay = Overlay([_lang_label(c) for c in self._langs])
 
         self.running = False
         self._recording = False
@@ -229,13 +229,9 @@ class TranscriptTool:
             return code
         return self._langs[0] if self._langs else 'en'
 
-    def _format_block(self, pairs):
-        """Render [(code, text), ...] as one labelled line per configured language."""
-        return "\n".join(f"**{_lang_label(c)}:** {t}" for c, t in pairs)
-
     def _post_translations(self, text, lang):
-        """Translate the phrase into every configured language locally and show each
-        as a labelled blue line."""
+        """Translate the phrase into every configured language locally and show each in
+        its own overlay column."""
         if not self.overlay or not text:
             return
         try:
@@ -243,7 +239,7 @@ class TranscriptTool:
         except Exception as e:
             _log(f"translate ERROR: {e!r}")
             pairs = [(c, text) for c in self._langs]
-        self.overlay.post(self._format_block(pairs), kind='response')
+        self.overlay.post([t for _, t in pairs])
 
     def _is_speaker_active(self):
         return time.monotonic() < self._speaker_hold_until
@@ -280,9 +276,9 @@ class TranscriptTool:
                 return
             try:
                 pairs = translate.to_languages(body, self._resolve_lang(lang), self._langs)
-                self.overlay.live_transcript(self._format_block(pairs))
+                self.overlay.live_transcript([t for _, t in pairs])
             except Exception:
-                self.overlay.live_transcript(body)
+                self.overlay.live_transcript([body])
 
         def run_partial(seg_bytes, prefix):
             def work():
