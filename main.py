@@ -1,9 +1,11 @@
-"""PolyCaption — real-time bilingual (EN/ES) conversation transcriber.
+"""PolyCaption — real-time multi-language conversation transcriber.
 
 Captures system audio (via VB-Cable "CABLE Output") and, optionally, the
 microphone, transcribes each phrase with faster-whisper, translates it locally
-with argos-translate, and shows both languages as an invisible-to-screen-capture
-overlay. No Claude / network calls — everything runs offline.
+with argos-translate, and shows every configured language as an
+invisible-to-screen-capture overlay. The set of languages is driven entirely by
+the `languages` config key, so any argos-supported pair works. No Claude /
+network calls — everything runs offline.
 """
 import os
 import sys
@@ -28,7 +30,8 @@ from hotkeys import (
 
 
 DEFAULT_CONFIG = {
-    "whisper_model": "small",          # small is fast and handles EN/ES well
+    "languages": ["en", "es"],         # argos/whisper codes; order = display order
+    "whisper_model": "small",          # small is fast and handles most languages well
     "capture_mic": True,               # transcribe both sides of the conversation
     "speaker_max_seconds": 180,
     "speaker_pause_threshold": 1.0,    # snappy commits for a live transcriber
@@ -40,6 +43,17 @@ DEFAULT_CONFIG = {
     "beam_size": 1,                    # greedy: lowest latency
     "audio_device_index": None,
 }
+
+# Display labels for the overlay; any code not listed falls back to its uppercase form.
+LANG_LABELS = {
+    "en": "EN", "es": "ES", "de": "DE", "ja": "JA", "fr": "FR", "it": "IT",
+    "pt": "PT", "ru": "RU", "zh": "ZH", "ko": "KO", "nl": "NL", "pl": "PL",
+    "tr": "TR", "ar": "AR", "hi": "HI", "uk": "UK", "sv": "SV", "cs": "CS",
+}
+
+
+def _lang_label(code):
+    return LANG_LABELS.get(code, code.upper())
 
 
 def get_base_dir():
@@ -95,7 +109,8 @@ def _hold_callback(tap_fn, hold_fn, threshold=0.15):
 class TranscriptTool:
     def __init__(self, config_path=None):
         self.config = _load_config()
-        self._whisper_language = None  # auto-detect (EN/ES)
+        self._langs = [c.lower() for c in (self.config.get('languages') or ['en', 'es'])]
+        self._whisper_language = None  # auto-detect, then snapped to a configured language
 
         self.device_index, self.recognizer = init_audio(
             fallback=self.config.get('audio_device_index'))
@@ -114,7 +129,7 @@ class TranscriptTool:
             self._whisper = WhisperModel(whisper_model, device="cpu", compute_type="int8")
         self._whisper_lock = threading.Lock()  # one WhisperModel, serialize across threads
 
-        translate.warmup()  # load EN<->ES packages in the background
+        translate.warmup(self._langs)  # install packages for the configured languages
 
         self.overlay = Overlay()
 
@@ -154,16 +169,30 @@ class TranscriptTool:
             text = " ".join(s.text.strip() for s in segments).strip()
             return (text, getattr(info, 'language', None)) if with_lang else text
 
-    def _post_bilingual(self, text, lang):
-        """Translate the phrase to English + Spanish locally and show both as blue text."""
+    def _resolve_lang(self, detected):
+        """Snap Whisper's detected language to a configured one. If the detection
+        isn't in the configured set (a misdetect), fall back to the first configured
+        language so translation still produces every line."""
+        code = (detected or '').lower()
+        if code in self._langs:
+            return code
+        return self._langs[0] if self._langs else 'en'
+
+    def _format_block(self, pairs):
+        """Render [(code, text), ...] as one labelled line per configured language."""
+        return "\n".join(f"**{_lang_label(c)}:** {t}" for c, t in pairs)
+
+    def _post_translations(self, text, lang):
+        """Translate the phrase into every configured language locally and show each
+        as a labelled blue line."""
         if not self.overlay or not text:
             return
         try:
-            en, es = translate.to_en_es(text, lang)
+            pairs = translate.to_languages(text, self._resolve_lang(lang), self._langs)
         except Exception as e:
             _log(f"translate ERROR: {e!r}")
-            en = es = text
-        self.overlay.post(f"**EN:** {en}\n**ES:** {es}", kind='response')
+            pairs = [(c, text) for c in self._langs]
+        self.overlay.post(self._format_block(pairs), kind='response')
 
     def _is_speaker_active(self):
         return time.monotonic() < self._speaker_hold_until
@@ -199,8 +228,8 @@ class TranscriptTool:
             if not (live and body):
                 return
             try:
-                en, es = translate.to_en_es(body, lang)
-                self.overlay.live_transcript(f"**EN:** {en}\n**ES:** {es}")
+                pairs = translate.to_languages(body, self._resolve_lang(lang), self._langs)
+                self.overlay.live_transcript(self._format_block(pairs))
             except Exception:
                 self.overlay.live_transcript(body)
 
@@ -312,7 +341,7 @@ class TranscriptTool:
                         self.overlay.clear_live_transcript()
                     if text:
                         print(f"Heard: {text}")
-                        self._post_bilingual(text, lang)
+                        self._post_translations(text, lang)
                 except KeyboardInterrupt:
                     self.running = False
                     break
@@ -347,7 +376,7 @@ class TranscriptTool:
                         self.overlay.clear_live_transcript()
                     if text:
                         print(f"You: {text}")
-                        self._post_bilingual(text, lang)
+                        self._post_translations(text, lang)
                 except Exception as e:
                     if live:
                         try:

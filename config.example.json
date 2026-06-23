@@ -1,4 +1,5 @@
 {
+  "languages": ["en", "es"],
   "whisper_model": "small",
   "capture_mic": true,
   "speaker_max_seconds": 180,

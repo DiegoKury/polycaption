@@ -1,17 +1,29 @@
 # PolyCaption
 
-Real-time **bilingual (EN/ES) conversation transcriber**. Captures audio, transcribes
+Real-time **multi-language conversation transcriber**. Captures audio, transcribes
 each phrase with [faster-whisper](https://github.com/SYSTRAN/faster-whisper), translates
 it locally with [argos-translate](https://github.com/argosopentech/argos-translate), and
-shows both languages in an overlay that is **invisible to screen capture / screen share**.
+shows **every language you configure** in an overlay that is **invisible to screen
+capture / screen share**.
+
+Pick any languages [argos supports](https://github.com/argosopentech/argos-translate#supported-languages)
+via the `languages` config key — e.g. `["de", "ja"]` for German + Japanese, or the default
+`["en", "es"]`. Whoever speaks one of those languages gets the others filled in. Translation
+pivots through English when there's no direct package (so `de`↔`ja` works without a
+`de`↔`ja` model).
+
+The full list of installable language packages is the
+[argospm index](https://www.argosopentech.com/argospm/index/). Almost every package is
+`X ↔ English`, so the rule of thumb is simple: any language with an English package in that
+index can be combined with any other.
 
 ## How it works
 
 - **Speaker audio** is captured via VB-Cable's `CABLE Output` device (set your call/app
   output to `CABLE Input`).
 - **Your microphone** is captured too (set `capture_mic: false` to disable).
-- Each phrase is transcribed in the spoken language, then the other language is filled in
-  by argos. Both lines render as blue text, updating live as you speak.
+- Each phrase is transcribed in the spoken language, then every other configured language
+  is filled in by argos. All lines render as blue text, updating live as you speak.
 
 ## Setup
 
@@ -42,6 +54,7 @@ run if one doesn't exist yet. Edit the values below to taste.
 
 | Key | Default | Notes |
 |---|---|---|
+| `languages` | `["en", "es"]` | ordered list of [argos codes](https://www.argosopentech.com/argospm/index/) to transcribe & display; order = display order |
 | `whisper_model` | `small` | `base` faster / `medium` more accurate |
 | `capture_mic` | `true` | also transcribe your own mic |
 | `speaker_max_seconds` | `180` | hard cap on a single speaker phrase before it's force-committed |
