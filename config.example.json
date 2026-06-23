@@ -1,0 +1,13 @@
+{
+  "whisper_model": "small",
+  "capture_mic": true,
+  "speaker_max_seconds": 180,
+  "speaker_pause_threshold": 1.0,
+  "mic_pause_threshold": 0.6,
+  "mic_max_seconds": 60,
+  "live_transcription": true,
+  "partial_interval": 1.2,
+  "commit_after_seconds": 18,
+  "beam_size": 1,
+  "audio_device_index": null
+}
