@@ -44,6 +44,10 @@ DEFAULT_CONFIG = {
     "audio_device_index": None,
 }
 
+# More than this many simultaneous languages hurts latency (every phrase is translated
+# N-1 ways) and overflows the overlay, so the configured list is truncated to this.
+MAX_LANGUAGES = 3
+
 # Display labels for the overlay; any code not listed falls back to its uppercase form.
 LANG_LABELS = {
     "en": "EN", "es": "ES", "de": "DE", "ja": "JA", "fr": "FR", "it": "IT",
@@ -54,6 +58,18 @@ LANG_LABELS = {
 
 def _lang_label(code):
     return LANG_LABELS.get(code, code.upper())
+
+
+def _force_utf8_io():
+    """Windows consoles default to cp1252, which raises UnicodeEncodeError the moment
+    we print a transcript containing CJK / non-Latin text — and that exception would be
+    swallowed by a capture loop, silently dropping the phrase before it reaches the
+    overlay. Make stdout/stderr tolerant so a print can never kill a capture thread."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
 
 
 def get_base_dir():
@@ -109,8 +125,17 @@ def _hold_callback(tap_fn, hold_fn, threshold=0.15):
 class TranscriptTool:
     def __init__(self, config_path=None):
         self.config = _load_config()
-        self._langs = [c.lower() for c in (self.config.get('languages') or ['en', 'es'])]
+        langs = [c.lower() for c in (self.config.get('languages') or ['en', 'es'])]
+        if len(langs) > MAX_LANGUAGES:
+            dropped = langs[MAX_LANGUAGES:]
+            langs = langs[:MAX_LANGUAGES]
+            _log(f"languages capped at {MAX_LANGUAGES}; dropped {dropped}")
+            print(f"Note: 'languages' is capped at {MAX_LANGUAGES} — using {langs}, dropped {dropped}")
+        self._langs = langs
         self._whisper_language = None  # auto-detect, then snapped to a configured language
+        # Validate against the argos index on a background thread — it hits the network
+        # (update_package_index), so doing it inline would add seconds to startup.
+        threading.Thread(target=self._validate_languages, daemon=True).start()
 
         self.device_index, self.recognizer = init_audio(
             fallback=self.config.get('audio_device_index'))
@@ -139,6 +164,32 @@ class TranscriptTool:
         self._speaker_hold_until = 0.0
         self._flush = threading.Event()        # force the active phrase to finalize now
         self._flush_done = threading.Event()
+
+    def _validate_languages(self):
+        """Check configured languages against the live argos index and warn about any
+        that won't translate, with the list of languages that are actually available.
+        Degrades to a no-op when argos is offline/unavailable so startup never blocks
+        on it. Misconfigured languages still run (untranslated), so this only warns."""
+        targets, sources = translate.language_availability()
+        if targets is None:
+            _log("language validation skipped (argos index unavailable)")
+            return
+        missing = [c for c in self._langs if c not in targets]       # no en->c: can't display
+        no_speech = [c for c in self._langs                          # has en->c but no c->en
+                     if c in targets and c not in sources]
+        if no_speech:
+            warn = ("Configured language(s) {} can be displayed but not transcribed from "
+                    "speech (no <lang>->en package) — if someone speaks them the text won't "
+                    "translate.").format(', '.join(no_speech))
+            _log(warn)
+            print(warn)
+        if missing:
+            available = ', '.join(sorted(targets))
+            warn = ("Configured language(s) {} are not available in the argos index and "
+                    "won't translate. Available languages: {}").format(
+                        ', '.join(missing), available)
+            _log(warn)
+            print('\n*** ' + warn + ' ***\n')
 
     # ── Transcription ──
 
@@ -439,6 +490,7 @@ def _show_error_popup(message):
 
 
 if __name__ == "__main__":
+    _force_utf8_io()
     _log(f"=== startup === base_dir={get_base_dir()} executable={sys.executable}")
     try:
         TranscriptTool().run()
