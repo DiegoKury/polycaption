@@ -1,4 +1,4 @@
-# Transcript Tool
+# PolyCaption
 
 Real-time **bilingual (EN/ES) conversation transcriber**. Captures audio, transcribes
 each phrase with [faster-whisper](https://github.com/SYSTRAN/faster-whisper), translates

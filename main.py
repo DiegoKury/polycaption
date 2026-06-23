@@ -1,4 +1,4 @@
-"""Transcript Tool — real-time bilingual (EN/ES) conversation transcriber.
+"""PolyCaption — real-time bilingual (EN/ES) conversation transcriber.
 
 Captures system audio (via VB-Cable "CABLE Output") and, optionally, the
 microphone, transcribes each phrase with faster-whisper, translates it locally
@@ -361,7 +361,7 @@ class TranscriptTool:
 
     def run(self):
         self.running = True
-        print("Starting transcript tool...")
+        print("Starting PolyCaption...")
         mods = MOD_CONTROL | MOD_SHIFT
         self.hotkeys = HotkeyManager()
         self.hotkeys.add(mods, VK_UP, self.overlay.scroll_up)
@@ -403,7 +403,7 @@ def _show_error_popup(message):
         from tkinter import messagebox
         root = tk.Tk()
         root.withdraw()
-        messagebox.showerror('Transcript Tool Error', message)
+        messagebox.showerror('PolyCaption Error', message)
         root.destroy()
     except Exception:
         pass
