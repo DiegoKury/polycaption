@@ -1,6 +1,10 @@
-import sys
 import pyaudio
 import speech_recognition as sr
+
+
+class SetupError(Exception):
+    """A user-fixable setup problem (e.g. VB-Cable missing). main.py shows the message
+    in a popup instead of dumping a traceback."""
 
 
 def find_audio_device(fallback=None):
@@ -13,8 +17,10 @@ def find_audio_device(fallback=None):
     if fallback is not None:
         print(f"CABLE Output not found, using fallback index {fallback}")
         return fallback
-    print("ERROR: VB-Cable not detected. Install/reinstall VB-Cable and reboot.")
-    sys.exit(1)
+    raise SetupError(
+        "VB-Cable not detected.\n\n"
+        "Install (or reinstall) VB-Cable from https://vb-audio.com/Cable/ and reboot, "
+        "then set your call/app's output to 'CABLE Input'.")
 
 
 def verify_audio_device(device_index):
@@ -33,8 +39,7 @@ def verify_audio_device(device_index):
             else:
                 print("Audio device OK - sound detected.")
     except Exception as e:
-        print(f"ERROR: Could not open audio device {device_index}: {e}")
-        sys.exit(1)
+        raise SetupError(f"Could not open audio device {device_index}: {e}")
 
 
 def find_mic_device():

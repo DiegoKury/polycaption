@@ -56,13 +56,20 @@ run if one doesn't exist yet. Edit the values below to taste.
 |---|---|---|
 | `languages` | `["en", "es"]` | ordered list of [argos codes](https://www.argosopentech.com/argospm/index/) to transcribe & display; order = display order |
 | `whisper_model` | `small` | `base` faster / `medium` more accurate |
+| `partial_model` | `null` | a faster model (e.g. `tiny`/`base`) for the live partial line, so it feels instant while the final text still uses `whisper_model`. `null` reuses `whisper_model` |
+| `speaker_language` | `null` | pin the **speaker's** language code (e.g. `ja`) to skip detection — faster & more accurate. `null` = auto-detect |
+| `mic_language` | `null` | pin **your** language code the same way |
+| `whisper_device` | `null` | `cuda` / `cpu`; `null` auto-tries CUDA then falls back to CPU |
+| `whisper_compute_type` | `null` | override e.g. `int8` / `float16`; `null` picks a sensible default per device |
 | `capture_mic` | `true` | also transcribe your own mic |
-| `speaker_max_seconds` | `180` | hard cap on a single speaker phrase before it's force-committed |
-| `speaker_pause_threshold` | `1.0` | seconds of speaker silence that ends a phrase |
+| `energy_threshold` | `100` | RMS level above which audio counts as speech. **Raise this** (e.g. `300`+) if the mic hears your speakers and phrases never end (no pause is ever detected) |
+| `speaker_max_seconds` | `30` | hard cap; a phrase with no detected pause is force-split here |
+| `speaker_pause_threshold` | `0.8` | seconds of speaker silence that ends a phrase |
 | `mic_pause_threshold` | `0.6` | seconds of mic silence that ends a phrase |
-| `mic_max_seconds` | `60` | hard cap on a single mic phrase before it's force-committed |
+| `mic_max_seconds` | `25` | hard cap on a single mic phrase before it's force-split |
+| `mic_resume_delay` | `0.8` | seconds to ignore the mic after the speaker stops (prevents echo on speakers). Set `0` if you use headphones |
 | `live_transcription` | `true` | show an updating partial line while you're still speaking |
 | `partial_interval` | `1.2` | seconds between live partial-transcript updates |
-| `commit_after_seconds` | `18` | for long phrases, transcribe in chunks of this length instead of waiting for silence |
+| `commit_after_seconds` | `8` | for long phrases, transcribe in chunks of this length instead of waiting for silence |
 | `beam_size` | `1` | greedy = lowest latency; raise for accuracy |
 | `audio_device_index` | `null` | fallback device index if `CABLE Output` isn't found |

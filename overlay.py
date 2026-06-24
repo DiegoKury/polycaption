@@ -16,6 +16,7 @@ BLUE = '#79c0ff'
 WHITE = '#e6edf3'
 TS = '#3d444d'
 FOOT = '#484f58'
+STATUS = '#8b949e'
 
 CELL_FONT = ('Segoe UI', 16)
 HEAD_FONT = ('Segoe UI', 9, 'bold')
@@ -52,7 +53,7 @@ class Overlay:
         header.pack(fill='x')
         header.pack_propagate(False)
         tk.Label(header, text='●', fg=BLUE, bg=PANEL, font=('Segoe UI', 7), padx=6).pack(side='left')
-        tk.Label(header, text='DIALOG', fg=BLUE, bg=PANEL, font=('Segoe UI', 8, 'bold')).pack(side='left')
+        tk.Label(header, text='PolyCaption', fg=BLUE, bg=PANEL, font=('Segoe UI', 8, 'bold')).pack(side='left')
         tk.Frame(self._border, bg=DIV, height=1).pack(fill='x')
 
         # ── Footer (packed bottom-up before the content) ──
@@ -102,6 +103,7 @@ class Overlay:
         # (_live_poll) applies it. Tkinter isn't thread-safe, so workers never touch widgets.
         self._live_pending = None   # ('show', cells) | ('clear', None)
         self._live_row = None
+        self._status_row = None     # transient "Loading…" / "Listening…" line
 
         self.root.update()
         self._hwnd = self._make_clickthrough(self.root)
@@ -192,9 +194,27 @@ class Overlay:
 
     # ── Public API (thread-safe) ──
 
+    def status(self, text):
+        """Thread-safe: show a transient centered status line (e.g. 'Loading…'). Replaced
+        on each call and removed automatically when the first real phrase is posted."""
+        def update():
+            if self._status_row is not None:
+                self._status_row.configure(text=text)
+            else:
+                self._status_row = tk.Label(self._rows, text=text, fg=STATUS, bg=BG,
+                                            font=('Segoe UI', 14), anchor='center', pady=12)
+                self._status_row.pack(fill='x')
+        self.root.after(0, update)
+
+    def _drop_status_row(self):
+        if self._status_row is not None:
+            self._status_row.destroy()
+            self._status_row = None
+
     def post(self, cells, kind='response'):
         """Thread-safe: add a finalized phrase row, one cell per language column."""
         def update():
+            self._drop_status_row()
             self._drop_live_row()
             block = self._block_of(cells)
             if self._last_block is not None and self._last_block != block:
@@ -228,6 +248,7 @@ class Overlay:
 
     def _render_live(self, cells):
         """Insert/replace the tentative live row at the bottom, in place to avoid flicker."""
+        self._drop_status_row()
         cells = self._norm(cells)
         if self._live_row is not None:
             row, labels = self._live_row
@@ -288,6 +309,7 @@ class Overlay:
     def clear(self):
         def update():
             self._drop_live_row()
+            self._status_row = None  # destroyed below with the rest of _rows' children
             for child in self._rows.winfo_children():
                 child.destroy()
             self._cells = []

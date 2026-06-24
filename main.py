@@ -22,7 +22,7 @@ from faster_whisper import WhisperModel
 
 import translate
 from overlay import Overlay
-from audio import init_audio, find_mic_device, make_recognizer
+from audio import init_audio, find_mic_device, make_recognizer, SetupError
 from hotkeys import (
     HotkeyManager, MOD_CONTROL, MOD_SHIFT,
     VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN, VK_OEM_PLUS, VK_OEM_MINUS,
@@ -32,14 +32,24 @@ from hotkeys import (
 DEFAULT_CONFIG = {
     "languages": ["en", "es"],         # argos/whisper codes; order = display order
     "whisper_model": "small",          # small is fast and handles most languages well
+    "partial_model": None,             # faster model (e.g. "tiny"/"base") for live partials;
+                                       # None reuses whisper_model
+    "speaker_language": None,          # pin the speaker's language (skips detection); None=auto
+    "mic_language": None,              # pin your mic's language (skips detection); None=auto
+    "whisper_device": None,            # "cuda"/"cpu"; None auto-tries cuda then cpu
+    "whisper_compute_type": None,      # override e.g. "int8"/"float16"; None picks per device
     "capture_mic": True,               # transcribe both sides of the conversation
-    "speaker_max_seconds": 180,
-    "speaker_pause_threshold": 1.0,    # snappy commits for a live transcriber
+    "energy_threshold": 100,           # RMS above this = speech; raise it if the mic hears
+                                       # your speakers and phrases never end (no detected pause)
+    "speaker_max_seconds": 30,         # hard cap; continuous audio is force-split here
+    "speaker_pause_threshold": 0.8,    # seconds of silence that ends a phrase
     "mic_pause_threshold": 0.6,
-    "mic_max_seconds": 60,
+    "mic_max_seconds": 25,
+    "mic_resume_delay": 0.8,           # seconds to ignore the mic after the speaker stops
+                                       # (avoids echo on speakers; set 0 if you use headphones)
     "live_transcription": True,
     "partial_interval": 1.2,
-    "commit_after_seconds": 18,
+    "commit_after_seconds": 8,         # for long phrases, commit/refresh in chunks this long
     "beam_size": 1,                    # greedy: lowest latency
     "audio_device_index": None,
 }
@@ -132,31 +142,46 @@ class TranscriptTool:
             _log(f"languages capped at {MAX_LANGUAGES}; dropped {dropped}")
             print(f"Note: 'languages' is capped at {MAX_LANGUAGES} — using {langs}, dropped {dropped}")
         self._langs = langs
-        self._whisper_language = None  # auto-detect, then snapped to a configured language
+        # Optional per-source language pins. When set, that capture loop tells Whisper the
+        # language outright (language=...) instead of auto-detecting — faster and more
+        # accurate. None means auto-detect, then snap to a configured language.
+        self._speaker_language = self.config.get('speaker_language') or None
+        self._mic_language = self.config.get('mic_language') or None
+        self._mic_resume_delay = float(self.config.get('mic_resume_delay', 0.8))
         # Validate against the argos index on a background thread — it hits the network
         # (update_package_index), so doing it inline would add seconds to startup.
         threading.Thread(target=self._validate_languages, daemon=True).start()
 
+        # Audio first: a missing VB-Cable raises SetupError here, before the overlay exists,
+        # so the error popup is clean (no half-built window).
         self.device_index, self.recognizer = init_audio(
             fallback=self.config.get('audio_device_index'))
-        self.recognizer.pause_threshold = float(self.config.get('speaker_pause_threshold', 1.0))
+        self.recognizer.pause_threshold = float(self.config.get('speaker_pause_threshold', 0.8))
+        self.recognizer.energy_threshold = float(self.config.get('energy_threshold', 100))
+
+        # Overlay up early so it can show a loading state during the slow model load.
+        self.overlay = Overlay([_lang_label(c) for c in self._langs])
+        self.overlay.status("Loading speech models…")
+        self.overlay.root.update()
 
         whisper_model = self.config.get('whisper_model', 'small')
-        _log(f"loading whisper model '{whisper_model}' on cuda...")
-        try:
-            self._whisper = WhisperModel(whisper_model, device="cuda", compute_type="float16")
-            dummy = np.zeros(16000, dtype=np.float32)
-            list(self._whisper.transcribe(dummy)[0])
-            _log("whisper: cuda ok")
-        except Exception as e:
-            _log(f"whisper: cuda failed ({e}), falling back to cpu")
-            print(f"GPU unavailable ({e.__class__.__name__}), using CPU for whisper")
-            self._whisper = WhisperModel(whisper_model, device="cpu", compute_type="int8")
-        self._whisper_lock = threading.Lock()  # one WhisperModel, serialize across threads
+        self._whisper = self._load_model(whisper_model)
+        self._whisper_lock = threading.Lock()       # serialize the accurate model across threads
+        # Optional faster model for live partials so the in-progress line feels instant; it
+        # runs on its own lock, concurrently with the accurate final pass.
+        self._partial_whisper = None
+        self._partial_lock = threading.Lock()
+        partial_model = self.config.get('partial_model')
+        if partial_model and partial_model != whisper_model:
+            try:
+                self._partial_whisper = self._load_model(partial_model)
+                _log(f"partial model '{partial_model}' loaded")
+            except Exception as e:
+                _log(f"partial model '{partial_model}' failed to load ({e}); partials use main model")
 
         translate.warmup(self._langs)  # install packages for the configured languages
-
-        self.overlay = Overlay([_lang_label(c) for c in self._langs])
+        self.overlay.status("Listening — Ctrl+Shift+Q to quit")
+        self.overlay.root.update()
 
         self.running = False
         self._recording = False
@@ -164,6 +189,25 @@ class TranscriptTool:
         self._speaker_hold_until = 0.0
         self._flush = threading.Event()        # force the active phrase to finalize now
         self._flush_done = threading.Event()
+
+    def _load_model(self, name, force_cpu=False):
+        """Load a WhisperModel honoring whisper_device/whisper_compute_type, with an
+        automatic cuda→cpu fallback when the device is left on auto."""
+        dev = self.config.get('whisper_device')
+        ctype = self.config.get('whisper_compute_type')
+        if force_cpu or dev == 'cpu':
+            return WhisperModel(name, device='cpu', compute_type=ctype or 'int8')
+        if dev == 'cuda':
+            return WhisperModel(name, device='cuda', compute_type=ctype or 'float16')
+        try:  # auto: prove cuda actually runs before committing to it
+            m = WhisperModel(name, device='cuda', compute_type=ctype or 'float16')
+            list(m.transcribe(np.zeros(16000, dtype=np.float32))[0])
+            _log(f"whisper '{name}': cuda ok")
+            return m
+        except Exception as e:
+            _log(f"whisper '{name}': cuda failed ({e}), falling back to cpu")
+            print(f"GPU unavailable for '{name}' ({e.__class__.__name__}), using CPU")
+            return WhisperModel(name, device='cpu', compute_type=ctype or 'int8')
 
     def _validate_languages(self):
         """Check configured languages against the live argos index and warn about any
@@ -193,27 +237,39 @@ class TranscriptTool:
 
     # ── Transcription ──
 
-    def _transcribe(self, audio_data, quick=False, with_lang=False):
+    def _transcribe(self, audio_data, quick=False, with_lang=False, language=None):
         """Transcribe sr.AudioData with faster-whisper. Returns text, or a
-        (text, detected_language) tuple when with_lang=True. Serialized by a lock."""
+        (text, detected_language) tuple when with_lang=True. `language` pins the spoken
+        language (skips detection) when given. Quick passes use the faster partial model
+        (if configured) on its own lock so they don't queue behind the accurate model."""
         raw = audio_data.get_raw_data(convert_rate=16000, convert_width=2)
         audio_np = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
         beam = 1 if quick else int(self.config.get('beam_size', 1))
         vad = dict(threshold=0.35, min_silence_duration_ms=300, speech_pad_ms=500)
-        with self._whisper_lock:
+        use_partial = quick and self._partial_whisper is not None
+        model = self._partial_whisper if use_partial else self._whisper
+        lock = self._partial_lock if use_partial else self._whisper_lock
+        with lock:
             try:
-                segments, info = self._whisper.transcribe(
-                    audio_np, language=self._whisper_language, beam_size=beam,
+                segments, info = model.transcribe(
+                    audio_np, language=language, beam_size=beam,
                     vad_filter=True, vad_parameters=vad)
             except Exception as e:
                 msg = str(e).lower()
-                if any(k in msg for k in ('cublas', 'cudnn', 'cuda', 'dll', 'cannot be loaded')):
+                cuda_like = any(k in msg for k in ('cublas', 'cudnn', 'cuda', 'dll', 'cannot be loaded'))
+                if use_partial and cuda_like:
+                    # Partials are throwaway — disable the partial model and skip this one;
+                    # the next partial falls back to the main model automatically.
+                    _log(f"partial model failed ({e}); disabling it, partials use main model")
+                    self._partial_whisper = None
+                    return ("", None) if with_lang else ""
+                if cuda_like:
                     _log(f"whisper cuda inference failed ({e}), switching to cpu")
                     print("CUDA unavailable for whisper — falling back to CPU")
-                    self._whisper = WhisperModel(self.config.get('whisper_model', 'small'),
-                                                 device="cpu", compute_type="int8")
+                    self._whisper = self._load_model(self.config.get('whisper_model', 'small'),
+                                                     force_cpu=True)
                     segments, info = self._whisper.transcribe(
-                        audio_np, language=self._whisper_language, beam_size=beam,
+                        audio_np, language=language, beam_size=beam,
                         vad_filter=True, vad_parameters=vad)
                 else:
                     raise
@@ -245,11 +301,12 @@ class TranscriptTool:
         return time.monotonic() < self._speaker_hold_until
 
     def _listen_phrase(self, source, recognizer, live, label, max_seconds,
-                       abort_check=None, set_speaker_hold=False):
+                       abort_check=None, set_speaker_hold=False, language=None):
         """Record one phrase with incremental transcription. While speech is ongoing a
         quick partial pass runs every ~partial_interval seconds and updates the overlay's
-        live line (both languages); long phrases are committed in <=commit_after-second
-        segments. Returns (full_phrase_text, detected_language), or (None, None)."""
+        live line (all languages); long phrases are committed in <=commit_after-second
+        segments. `language` pins the spoken language for this source (skips detection).
+        Returns (full_phrase_text, detected_language), or (None, None)."""
         sample_width = source.SAMPLE_WIDTH
         sample_rate = source.SAMPLE_RATE
         chunk_size = source.CHUNK
@@ -275,7 +332,7 @@ class TranscriptTool:
             if not (live and body):
                 return
             try:
-                pairs = translate.to_languages(body, self._resolve_lang(lang), self._langs)
+                pairs = translate.to_languages(body, self._resolve_lang(language or lang), self._langs)
                 self.overlay.live_transcript([t for _, t in pairs])
             except Exception:
                 self.overlay.live_transcript([body])
@@ -284,7 +341,7 @@ class TranscriptTool:
             def work():
                 try:
                     txt, lng = self._transcribe(sr.AudioData(seg_bytes, sample_rate, sample_width),
-                                                quick=True, with_lang=True)
+                                                quick=True, with_lang=True, language=language)
                     if txt:
                         show_live((prefix + ' ' + txt).strip(), lng)
                 except Exception as e:
@@ -298,7 +355,7 @@ class TranscriptTool:
             def work():
                 try:
                     txt, lng = self._transcribe(sr.AudioData(seg_bytes, sample_rate, sample_width),
-                                                with_lang=True)
+                                                with_lang=True, language=language)
                     if txt:
                         with committed_lock:
                             committed.append(txt)
@@ -358,7 +415,7 @@ class TranscriptTool:
             time.sleep(0.02)
         if seg_frames:
             tail, tlang = self._transcribe(sr.AudioData(b''.join(seg_frames), sample_rate, sample_width),
-                                           with_lang=True)
+                                           with_lang=True, language=language)
             if tlang:
                 lang_holder[0] = tlang
         else:
@@ -381,7 +438,8 @@ class TranscriptTool:
             while self.running:
                 try:
                     text, lang = self._listen_phrase(source, self.recognizer, live, '[Them]: ',
-                                                     speaker_max, set_speaker_hold=True)
+                                                     speaker_max, set_speaker_hold=True,
+                                                     language=self._speaker_language)
                     self._recording = False
                     self._speaker_heard_at = time.monotonic()
                     if live:
@@ -406,6 +464,7 @@ class TranscriptTool:
         """Capture the user's mic with the same incremental transcription."""
         recognizer = make_recognizer()
         recognizer.pause_threshold = float(self.config.get('mic_pause_threshold', 0.6))
+        recognizer.energy_threshold = float(self.config.get('energy_threshold', 100))
         live = bool(self.config.get('live_transcription', True))
         mic_max = float(self.config.get('mic_max_seconds', 60))
         time.sleep(2)  # let the speaker loop open its PyAudio stream first
@@ -413,11 +472,13 @@ class TranscriptTool:
         with sr.Microphone(device_index=mic_idx, sample_rate=44100) as source:
             while self.running:
                 try:
-                    if self._is_speaker_active() or time.monotonic() - self._speaker_heard_at < 3.0:
+                    if self._is_speaker_active() or \
+                            time.monotonic() - self._speaker_heard_at < self._mic_resume_delay:
                         time.sleep(0.2)
                         continue
                     text, lang = self._listen_phrase(source, recognizer, live, '[You]: ', mic_max,
-                                                     abort_check=self._is_speaker_active)
+                                                     abort_check=self._is_speaker_active,
+                                                     language=self._mic_language)
                     self._recording = False
                     if live:
                         self.overlay.clear_live_transcript()
@@ -491,6 +552,10 @@ if __name__ == "__main__":
     try:
         TranscriptTool().run()
         _log("run() returned (normal exit)")
+    except SetupError as e:
+        _log(f"SETUP ERROR: {e}")
+        print(f"\n*** {e} ***\n")
+        _show_error_popup(str(e))
     except Exception:
         import traceback
         tb = traceback.format_exc()
