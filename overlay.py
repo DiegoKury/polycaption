@@ -60,7 +60,7 @@ class Overlay:
         footer = tk.Frame(self._border, bg=PANEL, cursor='arrow')
         footer.pack(fill='x', side='bottom')
         tk.Frame(self._border, bg=DIV, height=1).pack(fill='x', side='bottom')
-        hotkey_text = '↑↓: Scroll   ←→: Move/Resize   −/+: Opacity   Q: Quit'
+        hotkey_text = '↑↓: Scroll   ←→: Move/Resize   −/+: Opacity   R: Reset   Q: Quit'
         tk.Label(footer, text=hotkey_text, bg=PANEL, fg=FOOT,
                  font=('Segoe UI', 6), anchor='w', padx=8, pady=3).pack(side='left')
 

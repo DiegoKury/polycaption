@@ -44,6 +44,7 @@ index can be combined with any other.
 | `Ctrl+Shift+↑/↓` | Scroll transcript history |
 | `Ctrl+Shift+←/→` | Move (tap) / resize width (hold) |
 | `Ctrl+Shift+ -/=` | Opacity down / up |
+| `Ctrl+Shift+R` | Reset / clear all text |
 | `Ctrl+Shift+Q` | Quit |
 
 ## Config (`config.json`)

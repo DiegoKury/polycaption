@@ -246,14 +246,17 @@ class TranscriptTool:
         audio_np = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
         beam = 1 if quick else int(self.config.get('beam_size', 1))
         vad = dict(threshold=0.35, min_silence_duration_ms=300, speech_pad_ms=500)
+        # condition_on_previous_text=False stops Whisper from feeding a hallucination back
+        # into itself (the "o'r fawr, o'r fawr…" repetition loops on music/intros);
+        # no_repeat_ngram_size kills the remaining short repeats.
+        opts = dict(language=language, beam_size=beam, vad_filter=True, vad_parameters=vad,
+                    condition_on_previous_text=False, no_repeat_ngram_size=3)
         use_partial = quick and self._partial_whisper is not None
         model = self._partial_whisper if use_partial else self._whisper
         lock = self._partial_lock if use_partial else self._whisper_lock
         with lock:
             try:
-                segments, info = model.transcribe(
-                    audio_np, language=language, beam_size=beam,
-                    vad_filter=True, vad_parameters=vad)
+                segments, info = model.transcribe(audio_np, **opts)
             except Exception as e:
                 msg = str(e).lower()
                 cuda_like = any(k in msg for k in ('cublas', 'cudnn', 'cuda', 'dll', 'cannot be loaded'))
@@ -268,12 +271,24 @@ class TranscriptTool:
                     print("CUDA unavailable for whisper — falling back to CPU")
                     self._whisper = self._load_model(self.config.get('whisper_model', 'small'),
                                                      force_cpu=True)
-                    segments, info = self._whisper.transcribe(
-                        audio_np, language=language, beam_size=beam,
-                        vad_filter=True, vad_parameters=vad)
+                    segments, info = self._whisper.transcribe(audio_np, **opts)
                 else:
                     raise
-            text = " ".join(s.text.strip() for s in segments).strip()
+            # Drop hallucinated segments (the "yng Nghymru…" gibberish on music/applause):
+            # whisper's own quality signals flag them — high no-speech probability, very
+            # low average log-prob, or an unnaturally high compression ratio (repetition).
+            parts = []
+            for s in segments:
+                if getattr(s, 'no_speech_prob', 0.0) > 0.6:
+                    continue
+                if getattr(s, 'avg_logprob', 0.0) < -1.0:
+                    continue
+                if getattr(s, 'compression_ratio', 1.0) > 2.4:
+                    continue
+                t = s.text.strip()
+                if t:
+                    parts.append(t)
+            text = " ".join(parts).strip()
             return (text, getattr(info, 'language', None)) if with_lang else text
 
     def _resolve_lang(self, detected):
@@ -327,6 +342,10 @@ class TranscriptTool:
         last_partial = 0.0
         partial_busy = [False]
         commit_busy = [False]
+        # Bumped on every commit. A partial captures the generation it was kicked off in
+        # and discards its result if a commit landed meanwhile — otherwise a slow partial
+        # for an already-committed segment would overwrite newer text (the "undo"/jitter).
+        seg_gen = [0]
 
         def show_live(body, lang=None):
             if not (live and body):
@@ -337,12 +356,14 @@ class TranscriptTool:
             except Exception:
                 self.overlay.live_transcript([body])
 
-        def run_partial(seg_bytes, prefix):
+        def run_partial(seg_bytes, prefix, gen):
             def work():
                 try:
                     txt, lng = self._transcribe(sr.AudioData(seg_bytes, sample_rate, sample_width),
                                                 quick=True, with_lang=True, language=language)
-                    if txt:
+                    # Drop the result if its segment was committed while we transcribed —
+                    # otherwise it would clobber the (newer) committed text.
+                    if txt and seg_gen[0] == gen:
                         show_live((prefix + ' ' + txt).strip(), lng)
                 except Exception as e:
                     _log(f"partial ERROR: {e!r}")
@@ -361,6 +382,7 @@ class TranscriptTool:
                             committed.append(txt)
                             if lng:
                                 lang_holder[0] = lng
+                            seg_gen[0] += 1  # invalidate in-flight partials of this segment
                         show_live(' '.join(committed), lang_holder[0])
                 except Exception as e:
                     _log(f"commit ERROR: {e!r}")
@@ -395,7 +417,8 @@ class TranscriptTool:
                 last_partial = now
                 with committed_lock:
                     prefix = ' '.join(committed)
-                run_partial(b''.join(seg_frames), prefix)
+                    gen = seg_gen[0]
+                run_partial(b''.join(seg_frames), prefix, gen)
 
             if started and seg_total >= commit_after and silent >= 0.25 and not commit_busy[0]:
                 run_commit(b''.join(seg_frames))
@@ -511,9 +534,10 @@ class TranscriptTool:
             norepeat=False)
         self.hotkeys.add(mods, VK_OEM_MINUS, lambda: self.overlay.adjust_opacity(-0.1))
         self.hotkeys.add(mods, VK_OEM_PLUS, lambda: self.overlay.adjust_opacity(0.1))
+        self.hotkeys.add(mods, ord('R'), self.overlay.clear)
         self.hotkeys.add(mods, ord('Q'), self.stop)
         self.hotkeys.start()
-        print("Hotkeys: Ctrl+Shift+↑↓ (scroll) | ←→ (move/resize) | -/= (opacity) | Q (quit)")
+        print("Hotkeys: Ctrl+Shift+↑↓ (scroll) | ←→ (move/resize) | -/= (opacity) | R (reset) | Q (quit)")
 
         mic_idx = find_mic_device() if self.config.get('capture_mic', True) else None
         threading.Thread(target=self._capture_loop, daemon=True).start()
